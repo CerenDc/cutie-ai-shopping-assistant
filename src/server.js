@@ -7,6 +7,8 @@ import OpenAI from "openai";
 
 const app = express();
 
+app.set("trust proxy", 1);
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -72,10 +74,18 @@ async function getProducts(maxPrice = 0) {
   });
 
   if (!response.ok) {
-    throw new Error(
-      `Erreur WooCommerce : ${response.status}`
+  const errorBody = await response.text();
+
+    console.error(
+    "WooCommerce API error:",
+    response.status,
+    errorBody
     );
-  }
+
+    throw new Error(
+    `Erreur WooCommerce : ${response.status}`
+    );
+}
 
   const products = await response.json();
 
