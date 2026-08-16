@@ -257,6 +257,18 @@ RÈGLES IMPORTANTES :
 9. Ton style est chaleureux, féminin, doux et professionnel, sans être excessivement enfantin.
 
 10. Reste concise : l'objectif est d'aider la cliente à choisir, pas de produire de très longues réponses.
+
+11. Tiens compte des informations données précédemment dans la conversation.
+Par exemple :
+- prénom ;
+- budget ;
+- couleurs préférées ;
+- destinataire du cadeau ;
+- occasion ;
+- préférences ;
+- produits déjà évoqués.
+
+12. Ne redemande pas une information que la cliente a déjà donnée dans la conversation.
 `;
 
 /* -----------------------------
@@ -289,7 +301,16 @@ app.get("/health", (req, res) => {
 
 app.post("/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    /*
+      On récupère :
+      - le nouveau message du visiteur ;
+      - l'identifiant de la réponse précédente
+        s'il existe.
+    */
+    const {
+      message,
+      previousResponseId,
+    } = req.body;
 
     /*
       Vérification du message.
@@ -314,10 +335,24 @@ app.post("/chat", async (req, res) => {
     }
 
     /*
-      Historique envoyé à OpenAI
-      pour cette requête.
+      On sécurise l'identifiant reçu
+      depuis le navigateur.
+
+      Si aucun identifiant n'existe,
+      il s'agit simplement du premier
+      message de la conversation.
     */
-    const input = [
+    let currentPreviousResponseId =
+      typeof previousResponseId === "string" &&
+      previousResponseId.trim().length > 0
+        ? previousResponseId.trim()
+        : null;
+
+    /*
+      Premier input :
+      le nouveau message de l'utilisateur.
+    */
+    let input = [
       {
         role: "user",
         content: message.trim(),
@@ -330,20 +365,54 @@ app.post("/chat", async (req, res) => {
       Maximum 3 tours de tool calling
       pour éviter une boucle infinie.
     */
-    for (let round = 0; round < 3; round++) {
-      response =
-        await openai.responses.create({
-          model: "gpt-5.6-luna",
+    for (
+      let round = 0;
+      round < 3;
+      round++
+    ) {
+      /*
+        Construction de la requête OpenAI.
 
-          instructions,
+        previous_response_id permet de rattacher
+        ce message à la conversation précédente.
+      */
+      const requestData = {
+        model: "gpt-5.6-luna",
 
-          input,
+        instructions,
 
-          tools,
-        });
+        input,
+
+        tools,
+
+        /*
+          On conserve la Response côté OpenAI
+          afin qu'elle puisse être référencée
+          au message suivant.
+        */
+        store: true,
+      };
 
       /*
-        Recherche les appels d'outils
+        Si une conversation existe déjà,
+        on indique à OpenAI quelle était
+        la dernière Response.
+      */
+      if (currentPreviousResponseId) {
+        requestData.previous_response_id =
+          currentPreviousResponseId;
+      }
+
+      /*
+        Appel OpenAI.
+      */
+      response =
+        await openai.responses.create(
+          requestData
+        );
+
+      /*
+        Recherche des appels d'outils
         demandés par le modèle.
       */
       const functionCalls =
@@ -361,10 +430,36 @@ app.post("/chat", async (req, res) => {
       }
 
       /*
-        On conserve la sortie précédente
-        dans le contexte de la prochaine requête.
+        IMPORTANT :
+
+        La réponse OpenAI qui vient de demander
+        le tool devient maintenant la réponse
+        précédente.
+
+        Cela permet de poursuivre correctement
+        la chaîne :
+        
+        utilisateur
+            ↓
+        OpenAI
+            ↓
+        tool call
+            ↓
+        WooCommerce
+            ↓
+        OpenAI
+            ↓
+        réponse finale
       */
-      input.push(...response.output);
+      currentPreviousResponseId =
+        response.id;
+
+      /*
+        Pour la requête suivante,
+        l'input contiendra uniquement
+        les résultats des outils.
+      */
+      const toolOutputs = [];
 
       /*
         Exécution des outils demandés.
@@ -387,7 +482,7 @@ app.post("/chat", async (req, res) => {
           On renvoie à OpenAI les vrais
           produits récupérés depuis WooCommerce.
         */
-        input.push({
+        toolOutputs.push({
           type: "function_call_output",
 
           call_id: call.call_id,
@@ -395,15 +490,44 @@ app.post("/chat", async (req, res) => {
           output: JSON.stringify(products),
         });
       }
+
+      /*
+        Le résultat WooCommerce devient
+        l'input du prochain appel OpenAI.
+      */
+      input = toolOutputs;
     }
 
     /*
-      Réponse finale envoyée au visiteur.
+      Vérification de sécurité supplémentaire.
+    */
+    if (!response) {
+      throw new Error(
+        "Aucune réponse OpenAI générée."
+      );
+    }
+
+    /*
+      Réponse finale envoyée AU NAVIGATEUR.
+
+      On envoie maintenant deux éléments :
+
+      1. answer
+         = le texte de Cutie AI
+
+      2. responseId
+         = l'identifiant OpenAI de cette réponse
+
+      Le navigateur conservera responseId
+      pour le prochain message.
     */
     return res.json({
       answer:
-        response?.output_text ||
+        response.output_text ||
         "Je n'ai pas réussi à générer une réponse.",
+
+      responseId:
+        response.id,
     });
   } catch (error) {
     /*
