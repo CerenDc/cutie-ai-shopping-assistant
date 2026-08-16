@@ -51,39 +51,87 @@ app.use("/chat", limiter);
 ------------------------------ */
 
 async function getProducts(maxPrice = 0) {
-  const credentials = Buffer.from(
-    `${process.env.WC_CONSUMER_KEY}:${process.env.WC_CONSUMER_SECRET}`
-  ).toString("base64");
-
   const url = new URL(
-    `${process.env.WC_URL}/wp-json/wc/v3/products`
+    `${process.env.WC_URL}/wp-json/wc/store/v1/products`
   );
 
-  url.searchParams.set("status", "publish");
-  url.searchParams.set("stock_status", "instock");
   url.searchParams.set("per_page", "100");
 
-  if (maxPrice && maxPrice > 0) {
-    url.searchParams.set("max_price", String(maxPrice));
-  }
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Basic ${credentials}`,
-    },
-  });
+  const response = await fetch(url);
 
   if (!response.ok) {
-  const errorBody = await response.text();
+    const errorBody = await response.text();
 
     console.error(
-    "WooCommerce API error:",
-    response.status,
-    errorBody
+      "WooCommerce Store API error:",
+      response.status,
+      errorBody
     );
 
     throw new Error(
-    `Erreur WooCommerce : ${response.status}`
+      `Erreur WooCommerce Store API : ${response.status}`
+    );
+  }
+
+  const products = await response.json();
+
+  return products
+    .filter((product) => product.is_in_stock)
+    .map((product) => {
+      const minorUnit =
+        Number(product.prices?.currency_minor_unit) || 2;
+
+      const rawPrice = Number(product.prices?.price);
+
+      const price =
+        Number.isFinite(rawPrice)
+          ? rawPrice / Math.pow(10, minorUnit)
+          : null;
+
+      return {
+        id: product.id,
+
+        name: product.name,
+
+        price,
+
+        url: product.permalink,
+
+        image:
+          product.images?.[0]?.src || null,
+
+        description: cleanText(
+          product.short_description ||
+            product.description ||
+            ""
+        ).slice(0, 800),
+
+        categories:
+          product.categories?.map(
+            (category) => category.name
+          ) || [],
+
+        tags:
+          product.tags?.map(
+            (tag) => tag.name
+          ) || [],
+
+        attributes:
+          product.attributes?.map((attribute) => ({
+            name: attribute.name,
+            options:
+              attribute.terms?.map(
+                (term) => term.name
+              ) || [],
+          })) || [],
+      };
+    })
+    .filter(
+      (product) =>
+        !maxPrice ||
+        maxPrice <= 0 ||
+        (product.price !== null &&
+          product.price <= maxPrice)
     );
 }
 
