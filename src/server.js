@@ -7,6 +7,10 @@ import OpenAI from "openai";
 
 const app = express();
 
+/*
+  Hostinger utilise un proxy devant l'application.
+  Nécessaire pour express-rate-limit.
+*/
 app.set("trust proxy", 1);
 
 const openai = new OpenAI({
@@ -17,7 +21,11 @@ const openai = new OpenAI({
    SÉCURITÉ
 ------------------------------ */
 
-app.use(express.json({ limit: "20kb" }));
+app.use(
+  express.json({
+    limit: "20kb",
+  })
+);
 
 const allowedOrigins = [
   "https://creativitybycutie.fr",
@@ -27,12 +35,14 @@ const allowedOrigins = [
 app.use(
   cors({
     origin(origin, callback) {
-      // Autorise aussi les tests sans navigateur (curl/Postman)
+      // Autorise également curl / Postman
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
-      return callback(new Error("Origin non autorisée"));
+      return callback(
+        new Error("Origin non autorisée")
+      );
     },
   })
 );
@@ -55,6 +65,10 @@ async function getProducts(maxPrice = 0) {
     `${process.env.WC_URL}/wp-json/wc/store/v1/products`
   );
 
+  /*
+    Maximum autorisé afin de récupérer
+    tout ton petit catalogue en une requête.
+  */
   url.searchParams.set("per_page", "100");
 
   const response = await fetch(url);
@@ -76,16 +90,29 @@ async function getProducts(maxPrice = 0) {
   const products = await response.json();
 
   return products
+    /*
+      On garde uniquement les produits disponibles.
+    */
     .filter((product) => product.is_in_stock)
+
+    /*
+      On transforme les données WooCommerce
+      dans un format simple pour Cutie AI.
+    */
     .map((product) => {
       const minorUnit =
-        Number(product.prices?.currency_minor_unit) || 2;
+        Number(
+          product.prices?.currency_minor_unit
+        ) || 2;
 
-      const rawPrice = Number(product.prices?.price);
+      const rawPrice = Number(
+        product.prices?.price
+      );
 
       const price =
         Number.isFinite(rawPrice)
-          ? rawPrice / Math.pow(10, minorUnit)
+          ? rawPrice /
+            Math.pow(10, minorUnit)
           : null;
 
       return {
@@ -117,15 +144,23 @@ async function getProducts(maxPrice = 0) {
           ) || [],
 
         attributes:
-          product.attributes?.map((attribute) => ({
-            name: attribute.name,
-            options:
-              attribute.terms?.map(
-                (term) => term.name
-              ) || [],
-          })) || [],
+          product.attributes?.map(
+            (attribute) => ({
+              name: attribute.name,
+
+              options:
+                attribute.terms?.map(
+                  (term) => term.name
+                ) || [],
+            })
+          ) || [],
       };
     })
+
+    /*
+      Si un budget maximum est indiqué,
+      on élimine les produits trop chers.
+    */
     .filter(
       (product) =>
         !maxPrice ||
@@ -135,46 +170,12 @@ async function getProducts(maxPrice = 0) {
     );
 }
 
-  const products = await response.json();
-
-  return products.map((product) => ({
-    id: product.id,
-
-    name: product.name,
-
-    price: product.price || null,
-
-    url: product.permalink,
-
-    image:
-      product.images?.[0]?.src || null,
-
-    description: cleanText(
-      product.short_description ||
-        product.description ||
-        ""
-    ).slice(0, 800),
-
-    categories:
-      product.categories?.map(
-        (category) => category.name
-      ) || [],
-
-    tags:
-      product.tags?.map(
-        (tag) => tag.name
-      ) || [],
-
-    attributes:
-      product.attributes?.map((attribute) => ({
-        name: attribute.name,
-        options: attribute.options,
-      })) || [],
-  }));
-}
+/* -----------------------------
+   NETTOYAGE DU TEXTE HTML
+------------------------------ */
 
 function cleanText(html) {
-  return html
+  return String(html || "")
     .replace(/<[^>]*>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -259,6 +260,19 @@ RÈGLES IMPORTANTES :
 `;
 
 /* -----------------------------
+   PAGE PRINCIPALE API
+------------------------------ */
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "Cutie AI",
+    message:
+      "Assistant IA Creativity by Cutie",
+  });
+});
+
+/* -----------------------------
    HEALTH CHECK
 ------------------------------ */
 
@@ -277,6 +291,9 @@ app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
 
+    /*
+      Vérification du message.
+    */
     if (
       typeof message !== "string" ||
       message.trim().length < 1
@@ -286,13 +303,21 @@ app.post("/chat", async (req, res) => {
       });
     }
 
+    /*
+      Évite les messages énormes
+      et donc les dépenses API inutiles.
+    */
     if (message.length > 1000) {
       return res.status(400).json({
         error: "Message trop long.",
       });
     }
 
-    let input = [
+    /*
+      Historique envoyé à OpenAI
+      pour cette requête.
+    */
+    const input = [
       {
         role: "user",
         content: message.trim(),
@@ -301,38 +326,67 @@ app.post("/chat", async (req, res) => {
 
     let response;
 
+    /*
+      Maximum 3 tours de tool calling
+      pour éviter une boucle infinie.
+    */
     for (let round = 0; round < 3; round++) {
-      response = await openai.responses.create({
-        model: "gpt-5.6-luna",
+      response =
+        await openai.responses.create({
+          model: "gpt-5.6-luna",
 
-        instructions,
+          instructions,
 
-        input,
+          input,
 
-        tools,
-      });
+          tools,
+        });
 
-      const functionCalls = response.output.filter(
-        (item) => item.type === "function_call"
-      );
+      /*
+        Recherche les appels d'outils
+        demandés par le modèle.
+      */
+      const functionCalls =
+        response.output.filter(
+          (item) =>
+            item.type === "function_call"
+        );
 
+      /*
+        S'il n'y a plus de tool call,
+        la réponse finale est prête.
+      */
       if (functionCalls.length === 0) {
         break;
       }
 
+      /*
+        On conserve la sortie précédente
+        dans le contexte de la prochaine requête.
+      */
       input.push(...response.output);
 
+      /*
+        Exécution des outils demandés.
+      */
       for (const call of functionCalls) {
         if (call.name !== "get_products") {
           continue;
         }
 
-        const args = JSON.parse(call.arguments);
-
-        const products = await getProducts(
-          args.max_price
+        const args = JSON.parse(
+          call.arguments
         );
 
+        const products =
+          await getProducts(
+            args.max_price
+          );
+
+        /*
+          On renvoie à OpenAI les vrais
+          produits récupérés depuis WooCommerce.
+        */
         input.push({
           type: "function_call_output",
 
@@ -343,13 +397,23 @@ app.post("/chat", async (req, res) => {
       }
     }
 
+    /*
+      Réponse finale envoyée au visiteur.
+    */
     return res.json({
       answer:
         response?.output_text ||
         "Je n'ai pas réussi à générer une réponse.",
     });
   } catch (error) {
-    console.error(error);
+    /*
+      L'erreur complète reste uniquement
+      dans les logs Hostinger.
+    */
+    console.error(
+      "Cutie AI error:",
+      error
+    );
 
     return res.status(500).json({
       error:
@@ -362,7 +426,8 @@ app.post("/chat", async (req, res) => {
    START SERVER
 ------------------------------ */
 
-const PORT = process.env.PORT || 3000;
+const PORT =
+  process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(
